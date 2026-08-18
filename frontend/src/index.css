@@ -1,0 +1,46 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap');
+
+@theme {
+  /* Strict monochrome scale — no hue anywhere in the product */
+  --color-ink-0: #ffffff;
+  --color-ink-50: #fafafa;
+  --color-ink-100: #f2f2f2;
+  --color-ink-200: #e4e4e4;
+  --color-ink-300: #cccccc;
+  --color-ink-400: #999999;
+  --color-ink-500: #737373;
+  --color-ink-600: #4d4d4d;
+  --color-ink-700: #2e2e2e;
+  --color-ink-800: #1a1a1a;
+  --color-ink-900: #0d0d0d;
+  --color-ink-950: #000000;
+
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-ink-0);
+  color: var(--color-ink-950);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-ink-300); border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-ink-500); }
+
+:focus-visible {
+  outline: 2px solid var(--color-ink-950);
+  outline-offset: 2px;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
