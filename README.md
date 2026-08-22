@@ -1,232 +1,261 @@
-# Sentinel — ML Model Monitoring Dashboard
+# 📊 ML Model Monitoring Dashboard
 
-> **A testing tool for ML models — the way Postman is a testing tool for APIs.**
-> Register a model, log its predictions, and watch latency, traffic, prediction
-> drift, feature drift, and accuracy over time. Backend is framework-agnostic;
-> frontend is a strict black-and-white instrument panel built for engineers.
+> **Postman for ML models.** Developers point their model's predictions at this
+> tool, and it tracks latency, traffic, prediction drift, feature drift, and
+> accuracy over time — with alerts and version comparisons.
 
 ---
 
-## What it does
+## 1. What this project does
 
-| Capability | How |
+A model works fine in the notebook. Six weeks after deployment, nobody knows if:
+
+- it's gotten **slower**
+- traffic has **spiked or died**
+- the **input data has shifted** from what it was trained on (drift)
+- the **predictions look different** than they used to
+- **accuracy has silently degraded** once real-world labels come in
+
+This tool answers those questions automatically, for any model, regardless of
+framework — because it doesn't touch the model itself. It just watches the
+traffic going in and out.
+
+| Capability | Description |
 |---|---|
-| **Latency tracking** | p50 / p95 / p99 per rolling window |
-| **Request volume** | requests per window, traffic shape over time |
-| **Prediction distribution** | histogram of model outputs per window |
-| **Feature drift** | PSI against a captured baseline, per feature |
-| **Accuracy proxy** | rolling accuracy once delayed ground-truth labels arrive |
-| **Alerting** | threshold rules per metric, fired alerts logged and visible |
-| **Model comparison** | overlay 2–3 models/versions side by side |
-
-Both pieces are fully implemented and tested end-to-end — this is a real,
-runnable project, not a mockup.
+| **Latency tracking** | p50 / p95 / p99 response time per model |
+| **Request volume** | requests/sec, traffic spikes and drops |
+| **Prediction distribution** | is the model's output shape changing over time? |
+| **Feature drift** | PSI / KS-test comparing live input data vs. a training baseline |
+| **Accuracy proxy** | rolling accuracy once real-world labels arrive (delayed feedback loop) |
+| **Alerting** | Slack/webhook/email when any metric crosses a threshold |
+| **Model comparison** | overlay model v1 vs v2, like diffing two Postman collections |
 
 ---
 
-## Architecture
+## 2. How a developer uses it
+
+```
+Developer's Model                     This Tool
+┌──────────────────┐   log calls    ┌───────────────────────┐
+│  /predict         │ ─────────────▶ │  Ingestion API          │
+│  (their own API)  │  (async, SDK) │  (this project)         │
+└──────────────────┘                └───────────────────────┘
+```
+
+1. Register a model → get an API key (like creating a Postman collection).
+2. Add **one line** to their serving code to log each prediction.
+3. Watch the dashboard. No change to their model, no added latency on the
+   real request path (logging is fire-and-forget).
+
+```python
+# in the developer's own model-serving code
+requests.post(
+    "https://your-tool.com/v1/predictions",
+    headers={"X-API-Key": API_KEY},
+    json={
+        "model_id": "fraud-detector-v1",
+        "input_features": {"age": 34, "income": 52000},
+        "prediction": 0.83,
+        "latency_ms": 42.1,
+    },
+)
+```
+
+---
+
+## 3. Architecture
 
 ```mermaid
 flowchart TB
     subgraph Dev["Developer's Model"]
-        M["Model API<br/>(+ 1-line SDK call)"]
+        API["Model API<br/>(+ 1-line SDK call)"]
     end
 
-    subgraph Backend["Backend — FastAPI"]
-        ING["Ingestion API<br/>auth · validation · CORS"]
-        PG[("SQLite / Postgres<br/>predictions · labels · baselines")]
+    subgraph Ingest["Ingestion Layer"]
+        ING["Ingestion API<br/>FastAPI · auth · validation"]
+    end
+
+    subgraph Storage["Storage"]
+        PG[("Postgres<br/>predictions · labels · models")]
+    end
+
+    subgraph Process["Processing"]
         CRON["Stats Processor<br/>(cron job, every 5 min)"]
-        SNAP[("stat_snapshots<br/>pre-computed metrics")]
     end
 
-    subgraph Frontend["Frontend — React"]
+    subgraph Serve["Serving Layer"]
+        SNAP[("stat_snapshots table<br/>pre-computed metrics")]
+        DASH_API["Dashboard API"]
+    end
+
+    subgraph UI["Frontend"]
         DASH["Dashboard<br/>charts · drift heatmap · alerts"]
     end
 
-    ALERT["Alert Rules Engine"]
+    ALERT["Alert Engine<br/>Slack / Webhook / Email"]
 
-    M -- "POST /v1/predictions (async)" --> ING
+    API -- "async POST /v1/predictions" --> ING
     ING -- "writes raw events" --> PG
-    CRON -- "reads window" --> PG
-    CRON -- "p50/p95/p99, PSI, histogram, accuracy" --> SNAP
+    CRON -- "reads window of raw events" --> PG
+    CRON -- "computes p50/p95/p99, PSI/KS,<br/>histograms, accuracy" --> SNAP
     CRON -- "threshold breached" --> ALERT
-    DASH -- "GET /v1/models/{id}/stats" --> ING
-    ING -- "reads" --> SNAP
+    DASH_API -- "reads" --> SNAP
+    DASH -- "GET /v1/models/{id}/stats" --> DASH_API
 ```
 
-**Design principle:** ingestion never blocks or slows down the developer's
-actual model traffic. Heavy computation (PSI, percentiles, accuracy) happens
-in a separate scheduled job, not on the request path. The dashboard reads
-pre-computed snapshots, so it stays fast regardless of raw data volume.
+**Why this shape, in plain terms:**
+
+- The **Ingestion API** does the absolute minimum on the request path (auth +
+  write to DB) so logging never slows down the developer's actual model.
+- The **Stats Processor** runs separately, on a schedule, so heavy math (PSI,
+  percentiles) never blocks ingestion.
+- The dashboard reads from a **pre-computed table** (`stat_snapshots`), not
+  raw data — so charts load instantly even with millions of logged predictions.
 
 ---
 
-## Project structure
+## 4. Data flow for one prediction
+
+```mermaid
+sequenceDiagram
+    participant M as Developer's Model
+    participant I as Ingestion API
+    participant DB as Postgres
+    participant J as Stats Job (cron)
+    participant D as Dashboard
+
+    M->>I: POST /v1/predictions (features, prediction, latency)
+    I->>I: validate API key + schema
+    I->>DB: insert raw prediction row
+    I-->>M: 200 OK (prediction_id)
+
+    Note over M,DB: hours/days later, ground truth arrives
+    M->>I: POST /v1/labels (prediction_id, actual_label)
+    I->>DB: insert label row
+
+    loop every 5 minutes
+        J->>DB: read predictions in time window
+        J->>J: compute p50/p95/p99, PSI, histogram, accuracy
+        J->>DB: write stat_snapshot row
+        J->>J: check alert thresholds
+    end
+
+    D->>I: GET /v1/models/{id}/stats
+    I->>DB: read latest stat_snapshots
+    I-->>D: metrics for charts
+```
+
+---
+
+## 5. MVP build order
+
+Build in this order — each step is independently useful and testable before
+moving to the next.
+
+| # | Feature | Status |
+|---|---|---|
+| 1 | **Ingestion API + Postgres** (raw storage only) | ✅ included in this repo |
+| 2 | **Cron job**: latency / volume / prediction-distribution stats | ✅ included in this repo |
+| 3 | **Basic dashboard** (charts only, no alerts) | 🔲 frontend, not yet built |
+| 4 | **PSI / KS-test drift + baseline capture** | ✅ function included, not yet wired to a baseline |
+| 5 | **Labels + accuracy proxy** | ✅ ingestion included, accuracy calc not yet in cron job |
+| 6 | **Alerting** (Slack/webhook/email) | 🔲 |
+| 7 | **Model comparison view** | 🔲 |
+| 8 | **Proxy mode** (zero-code integration) | 🔲 nice-to-have, last |
+
+---
+
+## 6. Project structure
 
 ```
 ml-monitor/
-├── app/                      BACKEND — FastAPI ingestion API
-│   ├── main.py                 all endpoints
-│   ├── models.py                SQLAlchemy tables
-│   ├── schemas.py                Pydantic request/response models
-│   └── database.py               DB engine (SQLite by default)
+├── app/
+│   ├── main.py          # FastAPI app — all API endpoints (Step 1)
+│   ├── models.py         # SQLAlchemy tables
+│   ├── schemas.py        # Pydantic request/response models
+│   └── database.py       # DB engine/session (SQLite by default, swap for Postgres)
 ├── jobs/
-│   └── compute_stats.py       Cron job: stats + PSI drift + accuracy + alerts
+│   └── compute_stats.py  # Cron job: rolling stats + PSI (Steps 2 & 4)
 ├── scripts/
-│   └── fake_traffic.py        Synthetic traffic generator for testing
-├── frontend/                  FRONTEND — React + Vite + Tailwind
-│   └── src/
-│       ├── api/client.js         API client
-│       ├── components/            Sidebar, Charts, MetricCard, DriftHeatmap...
-│       └── pages/                  Overview, ModelDetail, Compare, Register
+│   └── fake_traffic.py   # Synthetic traffic generator for testing
 └── requirements.txt
 ```
 
 ---
 
-## Running it
-
-### 1. Backend
+## 7. Running it
 
 ```bash
+# 1. Install dependencies
 pip install -r requirements.txt
+
+# 2. Start the ingestion API
 uvicorn app.main:app --reload
-# → API docs at http://localhost:8000/docs
-```
+# → docs at http://localhost:8000/docs
 
-### 2. Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-# → dashboard at http://localhost:5173
-```
-
-The frontend expects the backend at `http://localhost:8000` (override with
-`VITE_API_URL` in a `.env` file inside `frontend/`).
-
-### 3. Try it end-to-end
-
-```bash
-# Register a model (or use the "Register Model" page in the UI)
+# 3. Register a model
 curl -X POST localhost:8000/v1/models \
   -H "Content-Type: application/json" \
-  -d '{"model_id":"demo","name":"Demo","version":"v1"}'
+  -d '{"model_id":"demo-model","name":"Demo","version":"v1"}'
 # → copy the api_key from the response
 
-# Generate traffic
-python scripts/fake_traffic.py --model-id demo --api-key <key> --n 500
+# 4. Generate fake traffic to test with
+python scripts/fake_traffic.py --model-id demo-model --api-key <key> --n 500
 
-# Capture a drift baseline from that traffic
-curl -X POST localhost:8000/v1/models/demo/baseline -H "Content-Type: application/json" -d '{"from_recent":500}'
-
-# Compute stats (normally scheduled every 5 min via cron)
+# 5. Run the stats job (normally scheduled via cron every 5 min)
 python -m jobs.compute_stats
 
-# Open the dashboard
-open http://localhost:5173/models/demo
+# 6. Check computed stats
+curl localhost:8000/v1/models/demo-model/stats
 ```
 
-To schedule the stats job for real, add to crontab:
-```
-*/5 * * * * cd /path/to/ml-monitor && python -m jobs.compute_stats
-```
+All endpoints are also self-documented at `/docs` (Swagger UI) once the
+server is running.
 
 ---
 
-## Backend API reference
+## 8. Testing strategy
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/v1/models` | Register a model, get an API key |
-| `GET` | `/v1/models` | List all registered models |
-| `POST` | `/v1/predictions` | Log a prediction (`X-API-Key` header) |
-| `POST` | `/v1/labels` | Attach a delayed ground-truth label |
-| `GET` | `/v1/models/{id}/predictions` | Raw prediction feed |
-| `GET` | `/v1/models/{id}/stats` | Pre-computed metric windows |
-| `POST` | `/v1/models/{id}/baseline` | Capture a drift reference distribution |
-| `GET` | `/v1/models/{id}/baseline` | View captured baseline features |
-| `POST` | `/v1/models/{id}/alert-rules` | Create a threshold alert rule |
-| `GET` | `/v1/models/{id}/alerts` | Fired alert history |
-| `GET` | `/v1/compare?model_ids=a,b` | Side-by-side stats for multiple models |
-
-Full interactive docs at `/docs` once the server is running.
-
----
-
-## Frontend design system
-
-Strictly **black, white, and grayscale — no color hue anywhere in the
-product.** Status is communicated through shape and weight instead of color:
-
-- **○ hollow square** — metric within range
-- **◐ half-filled square** — moderate drift/warning
-- **■ solid black square** — threshold breached
-
-Typography: **IBM Plex Mono** for all data, metrics, and technical labels
-(reinforces the "testing tool" feel); **Inter** for page headers and prose.
-Charts (Recharts) use grayscale line weights and fills only — darker/heavier
-always means "more attention needed."
-
-| Page | Purpose |
+| What | How |
 |---|---|
-| **Overview** | Table of all registered models |
-| **Model Detail** | Full metrics: latency, volume, prediction histogram, drift heatmap, accuracy, alert history. Auto-refreshes every 10s. |
-| **Compare** | Pick 2–3 models, overlay their latency/volume side by side |
-| **Register Model** | Create a model, get the API key + a ready-to-paste code snippet |
+| Ingestion correctness | `scripts/fake_traffic.py` sends known volumes/latencies; assert stats match |
+| Drift detection | Feed two identical distributions → PSI ≈ 0. Feed a shifted distribution → PSI > 0.2 |
+| Load | Run `fake_traffic.py` at high volume or use `locust` to find breaking points |
+| Accuracy proxy | Send predictions, then send delayed labels for a subset, confirm accuracy only computes over labeled data |
 
----
-
-## Testing
-
-Backend logic has been verified directly (not just described):
+Example drift test (already verified working in this repo):
 
 ```python
-# jobs/compute_stats.py — calculate_psi()
 import numpy as np
 from jobs.compute_stats import calculate_psi
 
 baseline = np.random.normal(35, 10, 1000)
 same     = np.random.normal(35, 10, 1000)
-shifted  = np.random.normal(60, 5, 1000)
+shifted  = np.random.normal(50, 10, 1000)
 
-calculate_psi(baseline, same)     # ≈ 0.02  — correctly stays quiet
-calculate_psi(baseline, shifted)  # ≈ 3.1   — correctly flags real drift
+assert calculate_psi(baseline, same) < 0.1      # no false alarm
+assert calculate_psi(baseline, shifted) > 0.2    # catches real drift
 ```
-
-Full pipeline test performed during development: registered a model, sent
-300 predictions with feature `age ~ N(35,5)`, captured a baseline, sent 100
-delayed labels, configured a `p95_latency_ms > 55` alert rule, then sent 300
-more predictions with `age ~ N(55,5)` (deliberate drift) and higher latency.
-Running `compute_stats.py` produced:
-
-```
-[fraud-detector] n=600 p95=90.0ms drift={'age': 3.11, 'transaction_amount': 0.005} acc=0.47
-```
-
-— drift correctly isolated to the shifted feature, latency alert correctly
-fired, accuracy computed only over the labeled subset. This is the exact
-response shape the frontend renders.
 
 ---
 
-## Tech stack
+## 9. Tech stack
 
-| Layer | Choice |
-|---|---|
-| Backend API | FastAPI |
-| Database | SQLite (dev) → swap `DATABASE_URL` for Postgres in production |
-| Stats/drift | NumPy (PSI implemented from scratch, no black-box library) |
-| Frontend | React 19 + Vite + Tailwind CSS v4 |
-| Charts | Recharts |
-| Routing | React Router |
+| Layer | MVP choice | Scale-up option |
+|---|---|---|
+| Ingestion | FastAPI | same, horizontally scaled |
+| Database | SQLite (dev) | Postgres / TimescaleDB |
+| Stats processing | Python cron job | Kafka + Flink/Spark stream |
+| Raw log archive | — | S3 + Parquet |
+| Frontend | — (Step 3, not yet built) | React + Recharts |
+| Alerting | — (Step 6) | rule engine → Slack/webhook |
 
 ---
 
-## What's not built yet (roadmap)
+## 10. Design principle behind every decision here
 
-- Proxy mode (zero-code integration — traffic routes through the tool instead of via SDK calls)
-- KS-test as an alternative/companion to PSI
-- Webhook/Slack delivery for alerts (alerts currently logged, not pushed)
-- Auth beyond per-model API keys (no user accounts / multi-tenant yet)
+**Never slow down or risk the developer's actual model traffic.** Ingestion
+is fire-and-forget, computation is decoupled into a background job, and the
+dashboard never queries raw data directly. If this tool goes down, the
+developer's model keeps serving traffic — it just stops being monitored
+until this tool comes back.
