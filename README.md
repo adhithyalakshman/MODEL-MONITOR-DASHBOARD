@@ -149,14 +149,13 @@ sequenceDiagram
 
 ## 5. MVP build order
 
-Build in this order — each step is independently useful and testable before
-moving to the next.
+
 
 | # | Feature | Status |
 |---|---|---|
 | 1 | **Ingestion API + Postgres** (raw storage only) | ✅ included in this repo |
 | 2 | **Cron job**: latency / volume / prediction-distribution stats | ✅ included in this repo |
-| 3 | **Basic dashboard** (charts only, no alerts) | 🔲 frontend, not yet built |
+| 3 | **Basic dashboard** (charts only, no alerts) | ✅ frontend |
 | 4 | **PSI / KS-test drift + baseline capture** | ✅ function included, not yet wired to a baseline |
 | 5 | **Labels + accuracy proxy** | ✅ ingestion included, accuracy calc not yet in cron job |
 | 6 | **Alerting** (Slack/webhook/email) | 🔲 |
